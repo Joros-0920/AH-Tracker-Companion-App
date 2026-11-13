@@ -1,0 +1,28 @@
+{
+  // Type checking only: Node (and Electron's Node) run the .ts files directly by
+  // stripping the types, so there's no build step and no output.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2024"],
+    "types": ["node"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    /* What Node's type stripping can run */
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "moduleDetection": "force",
+
+    /* Checks */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src", "test", "electron"]
+}

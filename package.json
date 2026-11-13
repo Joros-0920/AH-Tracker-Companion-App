@@ -1,0 +1,70 @@
+{
+  "name": "ah-tracker-companion",
+  "productName": "AH Tracker",
+  "version": "0.1.0",
+  "description": "Companion app for the AH Tracker WoW Forever addon: shares scans, downloads realm prices, and shows the web app in a desktop window.",
+  "type": "module",
+  "main": "electron/main.ts",
+  "bin": {
+    "ahtc": "src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc -p .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "check": "yarn typecheck && yarn lint && yarn test",
+    "sync": "node src/cli.ts sync",
+    "watch": "node src/cli.ts watch",
+    "serve": "node src/cli.ts serve",
+    "build:web": "cd ../web && yarn install --immutable && yarn build",
+    "tray": "electron .",
+    "dist": "yarn build:web && electron-builder --win",
+    "dist:dir": "yarn build:web && electron-builder --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "oxlint": "^1.93.0",
+    "typescript": "~7.0.2"
+  },
+  "build": {
+    "appId": "dev.ahtracker.companion",
+    "productName": "AH Tracker",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "package.json",
+      "electron/**",
+      "src/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "AH-Tracker-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "AH-Tracker-${version}-portable.${ext}"
+    }
+  },
+  "license": "MIT",
+  "packageManager": "yarn@4.18.1"
+}
