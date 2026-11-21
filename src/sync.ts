@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listAccounts, appDataPath, addonDir, findWowPath, isWowFolder, type Account } from './wow.ts';
-import { readAccount, scansSince, type AccountData, type ClassNames, type ItemName } from './savedVars.ts';
+import { readAccount, scansSince, type AccountData, type ClassNames, type ItemName, type Recipe } from './savedVars.ts';
 import { decode, encode, merge, trim, DAY, type Point } from './history.ts';
 import { ApiClient, ApiError } from './api.ts';
 import { buildAppData, writeAppData } from './appData.ts';
@@ -77,7 +77,21 @@ export interface LocalData {
   watch: Record<string, number>;
   /** category names ("7" / "7:5" -> name), from every account */
   classes: ClassNames;
+  /** recipes and vendor prices from every account (see mergeCrafting) */
+  crafting?: Crafting;
   accounts: { name: string; owner: number | null; data: AccountData }[];
+}
+
+export interface Crafting { recipes: Record<string, Recipe>; vendorBuy: Record<string, number> }
+
+/** Recipes and vendor prices of several accounts as one. */
+export function mergeCrafting(accounts: { recipes?: Record<string, Recipe>; vendorBuy?: Record<string, number> }[]): Crafting {
+  const out: Crafting = { recipes: {}, vendorBuy: {} };
+  for (const a of accounts) {
+    Object.assign(out.recipes, a.recipes);
+    Object.assign(out.vendorBuy, a.vendorBuy);
+  }
+  return out;
 }
 
 const salesSeconds = (packed: string | undefined) => Number(packed?.split(':')[1]) || 0;
@@ -122,7 +136,7 @@ export function readLocal(wowPath: string, errors: string[] = [], accountList: A
   // records start "kind:time:", so sort by time across accounts
   const time = (rec: string) => Number(rec.split(':')[1]) || 0;
   for (const list of Object.values(ledgers)) list.sort((a, b) => time(a) - time(b));
-  return { local, names, lastScan, ladders, ledgers, sales, watch, classes, accounts };
+  return { local, names, lastScan, ladders, ledgers, sales, watch, classes, accounts, crafting: mergeCrafting(accounts.map((a) => a.data)) };
 }
 
 /** A watched item listed at or under its price in someone else's scan (from the server). */

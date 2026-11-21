@@ -16,7 +16,17 @@ const ITEMS: [id: number, name: string, quality: number, base: number][] = [
   [12363, 'Arcane Crystal', 2, 220000], [7078, 'Essence of Fire', 2, 18000], [7068, 'Elemental Fire', 1, 3500],
   [14344, 'Large Brilliant Shard', 3, 42000], [13446, 'Major Healing Potion', 1, 4500],
   [13452, 'Elixir of the Mongoose', 1, 16000],
+  // writs: two ask for something the demo account can craft, one for an item nobody here makes
+  [90001, "Craftsman's Writ: Major Healing Potion", 2, 2500], [90002, "Craftsman's Writ: Elixir of the Mongoose", 2, 6000],
+  [90003, "Craftsman's Writ: Volcanic Breastplate", 2, 4000],
 ];
+
+// the demo account's recipes (required reagents only) and a vendor-bought vial
+const RECIPES = {
+  13446: { q: 1, r: '13463:2,3821:1,8925:1' }, // Major Healing Potion: Dreamfoil, Goldthorn, Crystal Vial
+  13452: { q: 1, r: '13463:2,3821:2,8925:1' }, // Elixir of the Mongoose
+};
+const VENDOR_BUY = { 8925: 400 };
 
 // Categories as the classic-era client reports them (classID:subclassID).
 const CLOTH = '7:5', METAL = '7:7', HERB = '7:9', LEATHER = '7:6', ELEMENTAL = '7:10', ENCHANTING = '7:12', POTION = '0:1', ELIXIR = '0:2';
@@ -135,5 +145,6 @@ export function demoData(now = Math.floor(Date.now() / 1000)): LocalData {
     watch: {},
     classes: CLASSES,
     accounts: [],
+    crafting: { recipes: RECIPES, vendorBuy: VENDOR_BUY },
   };
 }

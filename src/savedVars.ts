@@ -43,7 +43,13 @@ export interface RawRealm {
   /** itemID -> "units:seconds", the addon's running sales estimate */
   sales?: Record<string, unknown>;
 }
-export interface RawDB { realms: Record<string, RawRealm>; watch?: Record<string, unknown>; classNames?: Record<string, unknown> }
+export interface RawDB {
+  realms: Record<string, RawRealm>;
+  watch?: Record<string, unknown>;
+  classNames?: Record<string, unknown>;
+  recipes?: Record<string, unknown>;
+  vendorBuy?: Record<string, unknown>;
+}
 export interface SavedVariables { AHTrackerDB?: RawDB }
 
 export interface RealmData {
@@ -64,6 +70,30 @@ export interface AccountData {
   watch: Record<string, number>;
   /** category names in the account's game language */
   classNames: ClassNames;
+  /** productID -> recipe recorded from a profession window (account-wide) */
+  recipes?: Record<string, Recipe>;
+  /** itemID -> what a vendor charges for one (crafting reagents) */
+  vendorBuy?: Record<string, number>;
+}
+
+/** q: units made per craft; r: "reagentID:count,..." (required reagents only) */
+export interface Recipe { q: number; r: string }
+const REAGENTS_RE = /^\d+:\d+(,\d+:\d+){0,29}$/;
+
+/** The addon's recipes and vendor prices, keeping only well-formed ones. */
+export function cleanCrafting(db: Pick<RawDB, 'recipes' | 'vendorBuy'>): { recipes: Record<string, Recipe>; vendorBuy: Record<string, number> } {
+  const recipes: Record<string, Recipe> = {};
+  for (const [id, raw] of Object.entries(db.recipes || {})) {
+    const r = raw as { q?: unknown; r?: unknown } | null;
+    if (!/^\d+$/.test(id) || !r || typeof r.r !== 'string' || !REAGENTS_RE.test(r.r)) continue;
+    const q = typeof r.q === 'number' && r.q > 0 && r.q < 1000 ? r.q : 1;
+    recipes[id] = { q, r: r.r };
+  }
+  const vendorBuy: Record<string, number> = {};
+  for (const [id, price] of Object.entries(db.vendorBuy || {})) {
+    if (/^\d+$/.test(id) && Number.isSafeInteger(price) && (price as number) > 0) vendorBuy[id] = price as number;
+  }
+  return { recipes, vendorBuy };
 }
 
 const SALES_RE = /^[\d.]+:\d+$/;
@@ -116,7 +146,7 @@ export function readAccount(file: string): AccountData | null {
   }
   const watch: Record<string, number> = {};
   for (const [id, price] of Object.entries(db.watch || {})) if (typeof price === 'number' && price > 0) watch[id] = price;
-  return { realms, watch, classNames: cleanClassNames(db.classNames) };
+  return { realms, watch, classNames: cleanClassNames(db.classNames), ...cleanCrafting(db) };
 }
 
 /** Two realms' data as one: every point (one per time), newest ladders, longest sales. */

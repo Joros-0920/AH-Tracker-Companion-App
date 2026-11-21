@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-21
+
+### Added
+
+- `GET /v1/recipes`: the recipes your addon recorded in profession windows, and what vendors charge for reagents, for the web app's Writs view. Private like trades: the hosted server needs you to log in, and only gives you your linked PCs' recipes.
+- Demo data has three Craftsman's Writs and two recipes.
+
 ## [1.1.0] - 2026-11-21
 
 ### Added
@@ -76,5 +83,6 @@ The builds aren't code-signed, so the first run shows "Windows protected your PC
 - Windows builds only. Building on Linux or WSL needs Wine.
 - Not code-signed.
 
+[1.1.1]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.0
 [0.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v0.1.0

@@ -203,6 +203,20 @@ test('each user sees the trades their linked PCs pushed', async () => {
   assert.deepEqual((await ledger(owner)).records, ['b:100:5:1:1000:0:0:Joros:', 'b:400:7:1:10:0:0:Joros:']);
 });
 
+test('recipes are private like trades: each user gets their linked PCs\' recipes', async () => {
+  assert.equal((await get('/v1/recipes')).status, 401);
+  const gina = await login('Recipes_A1');
+  const hal = await login('Recipes_B2');
+  const withRecipe = (product: number) =>
+    `AHTrackerDB = { ["realms"] = {}, ["recipes"] = { [${product}] = { ["q"] = 1, ["r"] = "2589:3" } }, ["vendorBuy"] = { [2320] = 10 } }`;
+  await pushAs(await linkDevice(gina), 'WOW1', withRecipe(100));
+  await pushAs(await linkDevice(hal), 'WOW1', withRecipe(200));
+  const g = await json(get('/v1/recipes', gina));
+  assert.deepEqual(Object.keys(g.recipes), ['100']);
+  assert.equal(g.vendorBuy['2320'], 10);
+  assert.deepEqual(Object.keys((await json(get('/v1/recipes', hal))).recipes), ['200']);
+});
+
 test('linking needs a login, and a code works for one person', async () => {
   const start = await json(post('/v1/link/start', { name: 'X' }));
   assert.equal((await post(`/v1/link/${start.code}/approve`)).status, 401);

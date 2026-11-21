@@ -12,7 +12,7 @@ test('lists realms', async () => {
   const res = await json(fetch(`${base}/v1/realms`));
   assert.equal(res.demo, true);
   assert.equal(res.realms[0].realm, 'Demo-Horde');
-  assert.equal(res.realms[0].items, 30);
+  assert.equal(res.realms[0].items, 33);
 });
 
 test('returns packed prices and names for a realm', async () => {
@@ -23,6 +23,12 @@ test('returns packed prices and names for a realm', async () => {
   assert.ok(points.every((p) => p.length === 4));
   assert.match(res.ladders['2589'], /^\d+:\d+(,\d+:\d+)*$/);
   assert.ok(res.ladderTime > 0);
+});
+
+test('returns the recipes and vendor prices for crafting costs', async () => {
+  const res = await json(fetch(`${base}/v1/recipes`));
+  assert.deepEqual(res.recipes['13446'], { q: 1, r: '13463:2,3821:1,8925:1' });
+  assert.equal(res.vendorBuy['8925'], 400);
 });
 
 test('returns the ledger for a realm', async () => {

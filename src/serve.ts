@@ -13,6 +13,9 @@
 //     icon (a file name on Blizzard's render CDN) and quality, plus the tooltip with tooltips=1
 //     (see items.ts); 404 when the server has no item source. Ids in neither list are still
 //     being looked up: ask again later.
+//   GET /v1/recipes -> { recipes: { productID: { q, r: "reagentID:count,..." } }, vendorBuy: { itemID: copper }, hosted? }
+//     the recipes your accounts recorded in profession windows, for crafting costs (Writs view).
+//     Private like the ledger: with privateLedger you must be logged in, and get your linked PCs' files.
 //   GET /v1/me -> { user, login }: who's logged in; login says whether Battle.net login is set up.
 //     With opts.auth, auth.ts also serves /auth/bnet/login, /auth/bnet/callback and /auth/logout.
 //   With a price store (the hosted server, AHTC_PRICE_SERVER=1), also:
@@ -35,7 +38,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { listAccounts, ADDON, type Account } from './wow.ts';
-import { readLocal, readCachedRemote, buildRealms, resolveWowPath, type LocalData } from './sync.ts';
+import { readLocal, readCachedRemote, buildRealms, resolveWowPath, mergeCrafting, type LocalData } from './sync.ts';
 import { demoData } from './demo.ts';
 import { readDB, readItems, scansSince, validQuality, type ItemName, type RawDB } from './savedVars.ts';
 import { MAX_AGE, RateLimit, anonReporter, reporterId, validRealm, type PriceStore } from './priceStore.ts';
@@ -492,6 +495,18 @@ export function createServer(config: ServerConfig, { demo = false, pushToken = p
         const answer: CachedAnswer = { stamp, text: JSON.stringify(body) };
         answers.set(cacheKey, answer);
         return sendCached(res, answer);
+      }
+      if (url.pathname === '/v1/recipes') {
+        const { crafting, accounts } = load();
+        if (privateLedger) {
+          if (!auth) return send(res, 401, { error: "Login isn't set up on this server, so recipes are hidden.", login: false });
+          const user = auth.user(req);
+          if (!user) return send(res, 401, { error: 'Log in with Battle.net to use your recipes.', login: true });
+          const admin = auth.isAdmin(user);
+          const mine = accounts.filter((a) => a.owner === user.id || (admin && a.owner === null));
+          return send(res, 200, { ...mergeCrafting(mine.map((a) => a.data)), hosted: true });
+        }
+        return send(res, 200, crafting ?? { recipes: {}, vendorBuy: {} });
       }
       const lm = url.pathname.match(/^\/v1\/realms\/([^/]+)\/ledger$/);
       if (lm) {
