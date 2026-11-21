@@ -3,6 +3,35 @@
 All notable changes to the AH Tracker companion app are listed here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.1.0] - 2026-11-21
+
+### Added
+
+- Item details for the web app: each item's icon, quality and in-game tooltip. `GET /v1/items?ids=…` answers with icon and quality, plus the tooltip with `tooltips=1`. The hosted server looks items up in Blizzard's Game Data API with its Battle.net login (Classic Era data first, then retail; `BLIZZARD_NAMESPACES` changes that) and keeps them in `items.json`, since they never change. The app asks the price server at `serverUrl` instead. New lookups are limited per IP address.
+- Realms are keyed by ruleset and faction (`PvP-Alliance`, `Normal-Horde`, `RP-PvP-Neutral`), to match addon 1.0.6. Old keys such as `CAMWOWUS2Realm8PvP-Alliance` are mapped to their ruleset wherever they come in: uploads, pushed SavedVariables and requests. So older addons and companions keep working. On startup, the price server merges realm files saved under old keys into their ruleset's file.
+- `/v1/realms/:realm/prices?item=ID` answers with one item's history. The web app loads the list with 30 days of history, and fetches an item's full history only when you pick a chart range longer than that.
+- Watchlist alerts: the app reads the addon's watchlist (`/aht watch`) and shows a desktop notification when a price pulled from the server is at or under your price. It skips your own scans and alerts once per new scan. Turn it off with `alerts false`.
+- `/v1/realms/:realm/prices` now includes `sales` (the addon's sell-rate estimate per item) and each item's vendor price in `names[id].v`. The price server keeps vendor prices from uploads.
+- Demo data has sell rates, a few vendor flips and item categories.
+- Item categories: the app passes each item's category (`names[id].c`) and the game's category names (`classes`) to the web app and the price server.
+- Price server: protection against fake uploads. Scans from unlinked PCs are anonymous and only fill in hours no linked PC reported (`AHTC_ANON_UPLOADS=fallback`; `off` refuses them). A report 3× off what other uploaders reported over the day before is dropped unless someone agrees. Anonymous uploads are limited per IP address too, and can't set vendor prices or rename items.
+- `ahtc reports <realm> <itemID>` shows who reported what and whether it counted; `ahtc ban`, `unban` and `bans` manage bans. Bans take effect on a running server within 10 seconds and remove the banned uploader's reports.
+
+### Changed
+
+- The server gzips JSON answers and web app files for clients that accept it. A realm's prices are megabytes of very repetitive text, so they come down several times smaller.
+- Vite's hashed files under `/assets` are cached by the browser for good (`immutable`); `index.html` is checked on every load, so a new build still shows up.
+- A full prices answer is built once and reused until the realm's data changes (or for 60 seconds at most), instead of being rebuilt and zipped for every browser that reloads after a scan.
+- The price server (`ahtc serve --price-server`) writes realm files at most every 5 seconds, batching the uploads that arrive in between, instead of rewriting a realm's whole file on every upload. Pending writes are saved on Ctrl+C and SIGTERM.
+
+### Fixed
+
+- Item quality -1, which the addon saved for items the game hadn't loaded during a full scan, counts as unknown instead of Common. An unknown quality no longer replaces a known one, either from an upload or when your own data is merged with the server's.
+- Uploads for realm keys with no realm name (`-Alliance`, `Unknown-Horde`), which old addons saved after WoW Forever's 2026-11-20 client update, are refused. They no longer show up as a realm called just "Alliance".
+- A sync no longer warns when the server has no prices yet for one of your realms, for example a new character's.
+
 ## [0.1.0] - 2026-11-13
 
 First release. A desktop companion for the AH Tracker addon for WoW Forever (`_forever_` client).
@@ -47,4 +76,5 @@ The builds aren't code-signed, so the first run shows "Windows protected your PC
 - Windows builds only. Building on Linux or WSL needs Wine.
 - Not code-signed.
 
+[1.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.0
 [0.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v0.1.0

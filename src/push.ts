@@ -11,7 +11,7 @@ import { saveConfig, type Config } from './config.ts';
 import { errorMessage } from './errors.ts';
 
 const TIMEOUT = 120_000;
-const USER_AGENT = 'AHTrackerCompanion/0.1';
+const USER_AGENT = 'AHTrackerCompanion/1.1';
 
 export type PushConfig = Partial<Pick<Config, 'wowPath' | 'pushUrl' | 'pushToken' | 'pushed'>>;
 type ReadyPushConfig = PushConfig & { pushUrl: string; pushToken: string };

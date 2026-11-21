@@ -3,10 +3,16 @@
 //   GET /v1/realms/:realm/prices?days=N  -> { realm, generated, items: { id: packed }, names: { id: { n, q } },
 //                                            ladders: { id: "price:qty,..." }, ladderTime }
 //     ladders are the newest local scan's listings, cheapest first, for buyout math.
+//     Also sales: { id: "units:seconds" }, the addon's sell-rate estimate, names[id].v (vendor price),
+//     names[id].c (category, "classID:subclassID") and classes: { "7": "Trade Goods", "7:5": "Cloth" }.
 //   GET /v1/realms/:realm/ledger         -> { realm, records: ["kind:t:id:qty:amount:fee:extra:char:name", ...], names }
 //     your own buys, sales, deposits and expiries from every account. With privateLedger (the
 //     hosted server) you must be logged in (401), and you get only the accounts your linked PCs
 //     pushed; admins (AHTC_ADMINS) also get files pushed with the shared token.
+//   GET /v1/items?ids=1,2,3[&tooltips=1] -> { items: { id: { icon, q, tooltip? } }, missing: [ids no source knows] }
+//     icon (a file name on Blizzard's render CDN) and quality, plus the tooltip with tooltips=1
+//     (see items.ts); 404 when the server has no item source. Ids in neither list are still
+//     being looked up: ask again later.
 //   GET /v1/me -> { user, login }: who's logged in; login says whether Battle.net login is set up.
 //     With opts.auth, auth.ts also serves /auth/bnet/login, /auth/bnet/callback and /auth/logout.
 //   With a price store (the hosted server, AHTC_PRICE_SERVER=1), also:
@@ -31,14 +37,18 @@ import type { AddressInfo } from 'node:net';
 import { listAccounts, ADDON, type Account } from './wow.ts';
 import { readLocal, readCachedRemote, buildRealms, resolveWowPath, type LocalData } from './sync.ts';
 import { demoData } from './demo.ts';
-import { readDB, readItems, scansSince, type RawDB } from './savedVars.ts';
-import { MAX_AGE, RateLimit, reporterId, validRealm, type PriceStore } from './priceStore.ts';
+import { readDB, readItems, scansSince, validQuality, type ItemName, type RawDB } from './savedVars.ts';
+import { MAX_AGE, RateLimit, anonReporter, reporterId, validRealm, type PriceStore } from './priceStore.ts';
 import { HttpError, statusOf, errorMessage } from './errors.ts';
+import { canonicalRealm } from './realm.ts';
 import type { Auth } from './auth.ts';
+import { MAX_ITEM_IDS, type ItemCache, type ItemInfo } from './items.ts';
 import type { Config } from './config.ts';
 
 const MAX_UPLOAD = 64 * 1024 * 1024; // bytes after unzipping; real files are a few MB
 const MAX_SCAN_UPLOAD = 32 * 1024 * 1024;
+// new items one address may have looked up per hour (a big realm is a few thousand items)
+const ITEM_LOOKUPS_PER_IP = 6000;
 // WoW account folder names: "WOW1", "123456789#1", ...
 const ACCOUNT_RE = /^[A-Za-z0-9#_.-]{1,64}$/;
 
@@ -166,7 +176,7 @@ export function ingestSavedVariables(store: PriceStore, account: string, db: Raw
     if (!validRealm(realm)) continue;
     const { items, names } = readItems(r.items);
     const scans = scansSince({ items }, since);
-    if (scans.length) store.ingest(realm, reporter, scans, names);
+    if (scans.length) store.ingest(realm, reporter, scans, names, db.classNames);
   }
 }
 
@@ -194,23 +204,86 @@ async function readJson(req: http.IncomingMessage, limit: number): Promise<unkno
   }
 }
 
-/** POST /v1/scans: any companion with an API key may upload; one report per key per hour bucket. */
-async function receiveScans(req: http.IncomingMessage, res: http.ServerResponse, store: PriceStore, limiter: RateLimit, auth: Auth | null): Promise<void> {
-  const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  if (key.length < 16 || key.length > 200) return send(res, 401, { error: 'Send your API key as "Authorization: Bearer <key>"' });
-  // a linked PC votes as its user, the same vote as that user's pushes
-  const user = auth?.deviceUser(key);
-  const reporter = user ? userReporter(user.id) : reporterId(key);
-  const body = (await readJson(req, MAX_SCAN_UPLOAD)) as { realm?: unknown; scans?: unknown; names?: unknown } | null;
-  if (!body || !validRealm(body.realm) || !Array.isArray(body.scans)) return send(res, 400, { error: 'Expected { realm, scans: [...] }' });
-  if (!limiter.take(reporter, Math.max(1, body.scans.length))) return send(res, 429, { error: 'Too many uploads; try again later' });
-  const r = store.ingest(body.realm, reporter, body.scans, body.names);
-  return send(res, 200, { ok: true, ...r });
+/** The caller's address: Fly's header, the first X-Forwarded-For hop, or the socket. */
+function clientIp(req: http.IncomingMessage): string {
+  const fly = req.headers['fly-client-ip'];
+  if (typeof fly === 'string' && fly) return fly;
+  const fwd = req.headers['x-forwarded-for'];
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
+  return first || req.socket.remoteAddress || '?';
 }
 
+/** Anonymous scans allowed per IP address per hour, however many API keys it uses. */
+export const ANON_SCANS_PER_IP = 240;
+
+/**
+ * POST /v1/scans. A linked PC's scans vote as its Battle.net user (one vote per user per
+ * hour bucket, however many PCs). A plain API key's scans are anonymous: they only fill in
+ * buckets no linked PC reported, and are refused with AHTC_ANON_UPLOADS=off.
+ */
+async function receiveScans(req: http.IncomingMessage, res: http.ServerResponse, store: PriceStore, limiter: RateLimit, ipLimiter: RateLimit, auth: Auth | null): Promise<void> {
+  const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (key.length < 16 || key.length > 200) return send(res, 401, { error: 'Send your API key as "Authorization: Bearer <key>"' });
+  const user = auth?.deviceUser(key);
+  const reporter = user ? userReporter(user.id) : anonReporter(key);
+  const body = (await readJson(req, MAX_SCAN_UPLOAD)) as { realm?: unknown; scans?: unknown; names?: unknown; classes?: unknown } | null;
+  if (!body || !validRealm(body.realm) || !Array.isArray(body.scans)) return send(res, 400, { error: 'Expected { realm, scans: [...] }' });
+  const n = Math.max(1, body.scans.length);
+  // per user for linked PCs; per key and per address for anonymous ones, so new keys don't help
+  if (!limiter.take(reporter, n) || (!user && !ipLimiter.take(clientIp(req), n))) {
+    return send(res, 429, { error: 'Too many uploads; try again later' });
+  }
+  const r = store.ingest(body.realm, reporter, body.scans, body.names, body.classes);
+  return send(res, 200, { ok: true, ...r, counted: user ? 'linked' : 'anonymous' });
+}
+
+/** Smaller bodies aren't worth compressing. */
+const MIN_COMPRESS = 1024;
+const COMPRESSIBLE = /^(text\/|application\/json|image\/svg)/;
+
+/** gzip if the client takes it (a full realm's prices are megabytes of very repetitive text). */
+const wantsGzip = (req: http.IncomingMessage | undefined): boolean => /\bgzip\b/i.test(String(req?.headers['accept-encoding'] || ''));
+
+/** A JSON answer kept for reuse, gzipped the first time a client asks for that. */
+interface CachedAnswer { stamp: string; text: string; gz?: Buffer }
+
+function sendCached(res: http.ServerResponse, answer: CachedAnswer): void {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
+  if (!wantsGzip(res.req) || Buffer.byteLength(answer.text) < MIN_COMPRESS) {
+    res.writeHead(200, headers);
+    res.end(answer.text);
+    return;
+  }
+  const reply = (gz: Buffer) => { res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' }); res.end(gz); };
+  if (answer.gz) return reply(answer.gz);
+  zlib.gzip(answer.text, { level: 6 }, (err, gz) => {
+    if (err) { res.writeHead(200, headers); res.end(answer.text); return; }
+    answer.gz = gz;
+    reply(gz);
+  });
+}
+
+/** Keep a realm's full answer this long at most, even if nothing changed (it trims by the clock). */
+const ANSWER_TTL = 60;
+
 function send(res: http.ServerResponse, status: number, body: unknown, type = 'application/json'): void {
-  res.writeHead(status, { 'Content-Type': type, 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
-  res.end(type === 'application/json' ? JSON.stringify(body) : body);
+  const headers: Record<string, string> = { 'Content-Type': type, 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
+  const text = type === 'application/json' ? JSON.stringify(body) : String(body);
+  if (Buffer.byteLength(text) < MIN_COMPRESS || !wantsGzip(res.req)) {
+    res.writeHead(status, headers);
+    res.end(text);
+    return;
+  }
+  // async, so compressing a big answer doesn't hold up other requests
+  zlib.gzip(text, { level: 6 }, (err, zipped) => {
+    if (err) {
+      res.writeHead(status, headers);
+      res.end(text);
+      return;
+    }
+    res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip' });
+    res.end(zipped);
+  });
 }
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, webDist: string): void {
@@ -223,8 +296,22 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, webDis
   if (!file.startsWith(webDist + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
     file = path.join(webDist, 'index.html');
   }
-  res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
-  fs.createReadStream(file).pipe(res);
+  const type = TYPES[path.extname(file)] || 'application/octet-stream';
+  // Vite's hashed files under /assets never change; index.html must be checked so a new build shows up
+  const hashed = path.relative(webDist, file).split(path.sep)[0] === 'assets';
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    'Cache-Control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
+    Vary: 'Accept-Encoding',
+  };
+  const stream = fs.createReadStream(file);
+  if (COMPRESSIBLE.test(type) && wantsGzip(req)) {
+    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+    stream.pipe(zlib.createGzip()).pipe(res);
+  } else {
+    res.writeHead(200, headers);
+    stream.pipe(res);
+  }
 }
 
 export const DEFAULT_PORT = 4417;
@@ -242,6 +329,8 @@ export interface ServerOptions {
   privateLedger?: boolean;
   /** folder with the built web app (default: web/dist in this repo) */
   webDist?: string;
+  /** item details for GET /v1/items (none: the route is a 404) */
+  items?: ItemCache | null;
 }
 
 export interface StartOptions extends ServerOptions {
@@ -273,11 +362,35 @@ export function startServer(config: ServerConfig, { port = DEFAULT_PORT, host = 
 /** True once the web app has been built (`yarn build` in web/), or `webDist` holds a build. */
 export const webBuilt = (webDist = WEB_DIST): boolean => fs.existsSync(path.join(webDist, 'index.html'));
 
+/** Two sets of item names, `b` winning, except that a known quality isn't lost to an unknown one. */
+export function mergeNames(a: Record<string, ItemName> | undefined, b: Record<string, ItemName> | undefined): Record<string, ItemName> {
+  const out = { ...a, ...b };
+  if (a && b) {
+    for (const id of Object.keys(b)) {
+      if (validQuality(b[id].q) === null && validQuality(a[id]?.q) !== null) out[id] = { ...b[id], q: a[id].q };
+    }
+  }
+  return out;
+}
+
 type RealmListing = { realm: string; items: number; lastScan: number | null; updated?: number | null };
 
-export function createServer(config: ServerConfig, { demo = false, pushToken = process.env.AHTC_PUSH_TOKEN, store = null, auth = null, privateLedger = false, webDist = WEB_DIST }: ServerOptions = {}): http.Server {
-  const load = dataSource(config, demo);
+export function createServer(config: ServerConfig, { demo = false, pushToken = process.env.AHTC_PUSH_TOKEN, store = null, auth = null, privateLedger = false, webDist = WEB_DIST, items: itemCache = null }: ServerOptions = {}): http.Server {
+  const loadData = dataSource(config, demo);
+  // a new object whenever SavedVariables are re-read, so the generation says when data changed
+  let lastData: LocalData | null = null;
+  let dataGen = 0;
+  const load = (): LocalData => {
+    const d = loadData();
+    if (d !== lastData) { lastData = d; dataGen++; }
+    return d;
+  };
+  // Full price answers by realm and range: every browser reloads after a scan, and building
+  // and zipping a big realm for each of them was the server's main cost.
+  const answers = new Map<string, CachedAnswer>();
   const limiter = new RateLimit();
+  const ipLimiter = new RateLimit(ANON_SCANS_PER_IP);
+  const itemLimiter = new RateLimit(ITEM_LOOKUPS_PER_IP);
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
@@ -304,13 +417,29 @@ export function createServer(config: ServerConfig, { demo = false, pushToken = p
       if (!store) return send(res, 404, { error: 'This server does not take scans (it is not a price server)' });
       if (req.method !== 'POST') return send(res, 405, { error: 'Use POST' });
       try {
-        return await receiveScans(req, res, store, limiter, auth);
+        return await receiveScans(req, res, store, limiter, ipLimiter, auth);
       } catch (err) {
         return send(res, statusOf(err), { error: errorMessage(err) });
       }
     }
     if (req.method !== 'GET') return send(res, 405, { error: 'Only GET is supported' });
     try {
+      if (url.pathname === '/v1/items') {
+        if (!itemCache) return send(res, 404, { error: 'This server has no item details' });
+        const raw = (url.searchParams.get('ids') || '').split(',').filter(Boolean);
+        if (raw.length > MAX_ITEM_IDS || !raw.every((x) => /^\d{1,10}$/.test(x))) {
+          return send(res, 400, { error: `ids must be up to ${MAX_ITEM_IDS} comma-separated item IDs` });
+        }
+        const ids = [...new Set(raw.map(Number))];
+        // each new id costs lookups at Blizzard; known ones are free
+        const fresh = itemCache.unknown(ids).filter((id) => !itemCache.pending.has(id)).length;
+        const found = fresh && !itemLimiter.take(clientIp(req), fresh) ? itemCache.known(ids) : await itemCache.get(ids);
+        // tooltips are most of the size: only when asked for
+        const tooltips = url.searchParams.get('tooltips') === '1';
+        const out: Record<string, Partial<ItemInfo>> = {};
+        for (const [id, info] of Object.entries(found)) out[id] = tooltips ? info : { icon: info.icon, q: info.q };
+        return send(res, 200, { items: out, missing: itemCache.misses(ids) });
+      }
       if (url.pathname === '/v1/realms') {
         const { local, lastScan, ledgers, ladders } = load();
         const byRealm = new Map<string, RealmListing>(Object.keys(local).map((realm) => [realm, {
@@ -328,29 +457,45 @@ export function createServer(config: ServerConfig, { demo = false, pushToken = p
       }
       const m = url.pathname.match(/^\/v1\/realms\/([^/]+)\/prices$/);
       if (m) {
-        const realm = decodeURIComponent(m[1]);
+        const realm = canonicalRealm(decodeURIComponent(m[1]));
         const days = Math.min(Math.max(Number(url.searchParams.get('days')) || 30, 1), 180);
         const since = Number(url.searchParams.get('since')) || 0;
-        const { local, names, ladders } = load();
+        const { local, names, ladders, sales, classes } = load();
         const now = Math.floor(Date.now() / 1000);
         // a companion pulling what's new: only the store knows what changed when
         if (store && since > 0) {
           const h = store.packed(realm, { days, since });
-          return send(res, 200, { realm, generated: now, full: false, cursor: h.cursor, items: h.items, names: h.names, updated: h.updated, lastScan: h.lastScan });
+          return send(res, 200, { realm, generated: now, full: false, cursor: h.cursor, items: h.items, names: h.names, classes: h.classes, updated: h.updated, lastScan: h.lastScan });
         }
-        const stored = store ? store.history(realm, { days }) : null;
-        const remote = demo ? {} : { [realm]: stored ? stored.items : readCachedRemote(realm) || {} };
-        const items = buildRealms({ [realm]: local[realm] || {} }, remote, now, days)[realm] || {};
+        // ?item=ID: one item's history (the web app loads long chart ranges this way)
+        const only = url.searchParams.get('item') ?? undefined;
+        if (only !== undefined && !/^\d{1,10}$/.test(only)) return send(res, 400, { error: 'item must be an item ID' });
+        const cacheKey = `${realm}|${days}`;
+        const stamp = `${dataGen}|${store ? `${store.load(realm).seq}|${store.load(realm).updated}` : '-'}|${Math.floor(now / ANSWER_TTL)}`;
+        if (!only) {
+          const hit = answers.get(cacheKey);
+          if (hit && hit.stamp === stamp) return sendCached(res, hit);
+        }
+        const pick = <T,>(all: Record<string, T> | undefined): Record<string, T> =>
+          !all || only === undefined ? all || {} : only in all ? { [only]: all[only] } : {};
+        const stored = store ? store.history(realm, { days, only }) : null;
+        const remote = demo ? {} : { [realm]: stored ? stored.items : pick(readCachedRemote(realm) || {}) };
+        const items = buildRealms({ [realm]: pick(local[realm]) }, remote, now, days)[realm] || {};
         if (!Object.keys(items).length && !local[realm]) return send(res, 404, { error: `No data for realm ${realm}` });
         const ladder = ladders?.[realm];
-        return send(res, 200, {
-          realm, generated: now, full: true, cursor: stored?.cursor ?? null, items, names: { ...stored?.names, ...names[realm] },
-          ladders: ladder?.items || {}, ladderTime: ladder?.t || null, updated: stored?.updated ?? null,
-        });
+        const body = {
+          realm, generated: now, full: !only, cursor: stored?.cursor ?? null, items, names: pick(mergeNames(stored?.names, names[realm])),
+          ladders: pick(ladder?.items), ladderTime: ladder?.t || null, sales: pick(sales?.[realm]), updated: stored?.updated ?? null,
+          classes: { ...stored?.classes, ...classes },
+        };
+        if (only) return send(res, 200, body);
+        const answer: CachedAnswer = { stamp, text: JSON.stringify(body) };
+        answers.set(cacheKey, answer);
+        return sendCached(res, answer);
       }
       const lm = url.pathname.match(/^\/v1\/realms\/([^/]+)\/ledger$/);
       if (lm) {
-        const realm = decodeURIComponent(lm[1]);
+        const realm = canonicalRealm(decodeURIComponent(lm[1]));
         const { ledgers, names, accounts } = load();
         if (privateLedger) {
           if (!auth) return send(res, 401, { error: "Login isn't set up on this server, so trades are hidden.", login: false });

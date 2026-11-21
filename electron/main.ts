@@ -7,8 +7,9 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import { loadConfig, configDir, type Config } from '../src/config.ts';
 import { Watcher } from '../src/watcher.ts';
-import { resolveWowPath } from '../src/sync.ts';
+import { formatMoney, resolveWowPath } from '../src/sync.ts';
 import { startServer, webBuilt } from '../src/serve.ts';
+import { itemCacheFor } from '../src/items.ts';
 import { linkPC } from '../src/link.ts';
 import { errorMessage } from '../src/errors.ts';
 
@@ -159,7 +160,7 @@ async function restartServer(): Promise<void> {
   serverUrl = null;
   try {
     // local only, no uploads; another free port if `ahtc serve` already has 4417
-    ({ server, url: serverUrl } = await startServer(config, { fallback: true, pushToken: null, webDist }));
+    ({ server, url: serverUrl } = await startServer(config, { fallback: true, pushToken: null, webDist, items: itemCacheFor(configDir(), config.serverUrl) }));
     log(`Web app at ${serverUrl}`);
   } catch (err) {
     log(`Web server failed: ${errorMessage(err)}`);
@@ -179,6 +180,14 @@ async function restart(): Promise<void> {
     lastError = summary.errors[0] || null;
     if (summary.wrote && Notification.isSupported()) {
       new Notification({ title: 'AH Tracker', body: `Prices updated for ${summary.items} items. Type /reload in game to load them.` }).show();
+    }
+    const alerts = summary.alerts ?? [];
+    if (alerts.length && config.alerts !== false && Notification.isSupported()) {
+      const name = (a: (typeof alerts)[number]) => a.name ?? `Item ${a.id}`;
+      const body = alerts.length === 1
+        ? `${name(alerts[0])} is listed at ${formatMoney(alerts[0].min)} (your price ${formatMoney(alerts[0].max)}).`
+        : `${alerts.slice(0, 3).map(name).join(', ')}${alerts.length > 3 ? ` and ${alerts.length - 3} more` : ''} are at or under your price.`;
+      new Notification({ title: 'AH Tracker watchlist', body }).show();
     }
     refresh();
   });

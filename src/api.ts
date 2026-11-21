@@ -1,8 +1,8 @@
 // Client for the AH Tracker price server (API described in docs/DESIGN.md).
 import zlib from 'node:zlib';
-import type { ItemName, Scan } from './savedVars.ts';
+import type { ClassNames, ItemName, Scan } from './savedVars.ts';
 
-const USER_AGENT = 'AHTrackerCompanion/0.1';
+const USER_AGENT = 'AHTrackerCompanion/1.1';
 const TIMEOUT = 30_000;
 
 export class ApiError extends Error {
@@ -25,6 +25,7 @@ export interface PricesResponse {
   /** itemID -> packed history */
   items?: Record<string, string>;
   names?: Record<string, ItemName>;
+  classes?: ClassNames;
 }
 
 export class ApiClient {
@@ -52,9 +53,12 @@ export class ApiClient {
     return (res.status === 204 ? null : await res.json()) as T;
   }
 
-  /** scans: [{ t, items: [[itemID, min, mkt, qty], ...] }]; names (optional): { itemID: { n, q } } */
-  uploadScans(realm: string, scans: Scan[], names?: Record<string, ItemName>): Promise<UploadResult | null> {
-    return this.request('POST', '/v1/scans', names ? { realm, scans, names } : { realm, scans });
+  /**
+   * scans: [{ t, items: [[itemID, min, mkt, qty], ...] }]; names (optional): { itemID: { n, q, v, c } };
+   * classes (optional): category names, { "7": "Trade Goods", "7:5": "Cloth" }
+   */
+  uploadScans(realm: string, scans: Scan[], names?: Record<string, ItemName>, classes?: ClassNames): Promise<UploadResult | null> {
+    return this.request('POST', '/v1/scans', { realm, scans, ...(names ? { names } : {}), ...(classes ? { classes } : {}) });
   }
 
   /**

@@ -11,7 +11,9 @@ import { sync, resolveWowPath, type SyncSummary } from './sync.ts';
 import { Watcher } from './watcher.ts';
 import { listAccounts, addonDir, appDataPath } from './wow.ts';
 import { startServer, ingestPushedFiles, DEFAULT_PORT } from './serve.ts';
-import { PriceStore } from './priceStore.ts';
+import { PriceStore, anonModeFrom } from './priceStore.ts';
+import { itemCacheFor } from './items.ts';
+import { banTarget, banCommand, reportsCommand } from './moderation.ts';
 import { linkPC } from './link.ts';
 import { errorMessage } from './errors.ts';
 import type { Recent } from './db.ts';
@@ -33,6 +35,14 @@ Usage: ahtc <command>
   users                  How many people have signed up with Battle.net (reads AHTC_DB_PATH;
                          for the hosted server run scripts/deploy.sh --users)
   install-addon          Copy the addon from this repo into the WoW AddOns folder
+
+Price server moderation (run on the server; AHTC_DATA_DIR and AHTC_DB_PATH as when serving):
+  reports <realm> <itemID> [hours]
+                         Who reported what for an item (default: last 24 hours), and what counted
+  ban <who> [note]       Ignore an uploader and remove their reports. <who>: a BattleTag,
+                         a user ID, or a reporter id from "reports" (anon:...)
+  unban <who>            Take a ban back (removed reports don't come back)
+  bans                   List bans
   serve [--port N] [--host H] [--price-server]
                          Run the web app at http://localhost:4417 (add --demo for made-up data).
                          --price-server (or AHTC_PRICE_SERVER=1) also takes scans from other
@@ -93,9 +103,13 @@ async function loadAuth(port: number, log: (msg: string) => void) {
   return new Auth(openDb(file), { clientId, clientSecret, publicUrl, admins, oauthBase: process.env.BNET_OAUTH_URL });
 }
 
+/** The price server's data folder and user database, as `serve` uses them. */
+const dataDir = () => process.env.AHTC_DATA_DIR || path.join(configDir(), 'prices');
+const dbPath = () => process.env.AHTC_DB_PATH || path.join(configDir(), 'ahtc.db');
+
 async function users(): Promise<void> {
   const { openDbReadOnly, userStats } = await import('./db.ts');
-  const file = process.env.AHTC_DB_PATH || path.join(configDir(), 'ahtc.db');
+  const file = dbPath();
   const db = openDbReadOnly(file);
   const s = userStats(db);
   db.close();
@@ -174,7 +188,17 @@ async function main(argv: string[]): Promise<void> {
       const host = opt('--host') || process.env.HOST || '127.0.0.1';
       // price server: take scans from companions and serve them back (the hosted copy)
       const priceServer = !demo && (args.includes('--price-server') || /^(1|true|yes)$/i.test(process.env.AHTC_PRICE_SERVER || ''));
-      const store = priceServer ? new PriceStore(process.env.AHTC_DATA_DIR || path.join(configDir(), 'prices')) : null;
+      // uploads are batched into one write per realm every few seconds; write the rest on exit
+      const store = priceServer ? new PriceStore(dataDir(), { anon: anonModeFrom(process.env.AHTC_ANON_UPLOADS), saveDelayMs: 5000 }) : null;
+      if (store) {
+        const stop = (signal: string) => {
+          try { store.flush(); } catch (err) { console.error(`Couldn't save prices: ${errorMessage(err)}`); }
+          process.exit(signal === 'SIGINT' ? 130 : 143);
+        };
+        process.once('SIGINT', () => stop('SIGINT'));
+        process.once('SIGTERM', () => stop('SIGTERM'));
+      }
+      if (store) log(`Price server: anonymous uploads ${store.anon === 'off' ? 'refused' : 'only fill gaps'} (AHTC_ANON_UPLOADS=${store.anon}).`);
       // trades stay private anywhere but a local-only server
       const privateLedger = priceServer || !['127.0.0.1', 'localhost', '::1'].includes(host);
       const auth = demo ? null : await loadAuth(port, log);
@@ -183,12 +207,20 @@ async function main(argv: string[]): Promise<void> {
         const n = ingestPushedFiles(config, store, log);
         if (n) log(`Loaded ${n} pushed account file(s) into the price store.`);
       }
-      const { url } = await startServer(config, { demo, port, host, store, auth, privateLedger });
+      const items = itemCacheFor(configDir(), config.serverUrl);
+      if (items) process.once('exit', () => items.save());
+      const { url } = await startServer(config, { demo, port, host, store, auth, privateLedger, items });
       log(`Web app at ${url}${demo ? ' (demo data)' : ''}${store ? `, price server on (data in ${store.dir})` : ''}. Press Ctrl+C to stop.`);
       return new Promise(() => {});
     }
     case 'users':
       return users();
+    case 'reports':
+      return reportsCommand(dataDir(), args);
+    case 'ban':
+    case 'unban':
+    case 'bans':
+      return banCommand(cmd, dataDir(), args, (who) => banTarget(who, dbPath()));
     case 'install-addon':
       return installAddon(config);
     default:

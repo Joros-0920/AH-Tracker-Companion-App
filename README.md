@@ -84,10 +84,13 @@ The settings file is `%APPDATA%\AHTrackerCompanion\config.json` on Windows, or `
 | `intervalMinutes` | 30 | How often to sync while running, besides syncing whenever the game saves |
 | `serverUrl` | none | A price server to share scans with. Each sync uploads your new scans and downloads the prices that changed since the last sync |
 | `upload` | true | Send your scans to `serverUrl` (set to false to only download) |
+| `alerts` | true | Desktop notification when someone else's scan finds an item on your in-game watchlist (`/aht watch`) at or under your price. Needs `serverUrl` |
 
 Without `serverUrl`, nothing leaves your PC: the app only merges scans across your own accounts.
 
 `apiKey` is created on first run. It identifies this install to a price server; your account names are never sent.
+
+On the hosted server, scans from a PC that isn't linked to a Battle.net login only fill in gaps: they never outvote linked players, and a server may refuse them. Choose **Link to website** in the tray menu (or run `node src/cli.ts link`) so your scans count.
 
 ## Development
 

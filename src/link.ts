@@ -4,7 +4,7 @@
 import os from 'node:os';
 import { saveConfig, type Config } from './config.ts';
 
-const USER_AGENT = 'AHTrackerCompanion/0.1';
+const USER_AGENT = 'AHTrackerCompanion/1.1';
 
 /** What /v1/link/start and /v1/link/poll answer (see auth.ts). */
 interface LinkReply {

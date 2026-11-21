@@ -18,6 +18,21 @@ const ITEMS: [id: number, name: string, quality: number, base: number][] = [
   [13452, 'Elixir of the Mongoose', 1, 16000],
 ];
 
+// Categories as the classic-era client reports them (classID:subclassID).
+const CLOTH = '7:5', METAL = '7:7', HERB = '7:9', LEATHER = '7:6', ELEMENTAL = '7:10', ENCHANTING = '7:12', POTION = '0:1', ELIXIR = '0:2';
+const CATEGORY: Record<number, string> = {
+  2589: CLOTH, 2592: CLOTH, 4306: CLOTH, 4338: CLOTH, 14047: CLOTH,
+  2770: METAL, 2771: METAL, 2772: METAL, 3858: METAL, 10620: METAL,
+  2447: HERB, 765: HERB, 785: HERB, 2450: HERB, 3356: HERB, 3818: HERB, 3821: HERB, 13463: HERB, 13468: HERB,
+  2318: LEATHER, 2319: LEATHER, 4234: LEATHER, 4304: LEATHER, 8170: LEATHER,
+  12363: ELEMENTAL, 7078: ELEMENTAL, 7068: ELEMENTAL, 14344: ENCHANTING, 13446: POTION, 13452: ELIXIR,
+};
+const CLASSES = {
+  0: 'Consumable', '0:1': 'Potion', '0:2': 'Elixir',
+  7: 'Trade Goods', [CLOTH]: 'Cloth', [METAL]: 'Metal & Stone', [HERB]: 'Herb', [LEATHER]: 'Leather',
+  [ELEMENTAL]: 'Elemental', [ENCHANTING]: 'Enchanting',
+};
+
 // Small deterministic random generator so the demo looks the same every run.
 function rng(seed: number): () => number {
   let s = seed >>> 0;
@@ -35,6 +50,7 @@ export function demoData(now = Math.floor(Date.now() / 1000)): LocalData {
   const names: Record<string, ItemName> = {};
   const scanTimes: number[] = [];
   const ladders: Record<string, string> = {};
+  const sales: Record<string, string> = {};
   // 3 scans a day for 30 days
   for (let t = now - 30 * DAY; t <= now - 600; t += DAY / 3) scanTimes.push(Math.round(t + rand() * 3600));
 
@@ -70,6 +86,13 @@ export function demoData(now = Math.floor(Date.now() / 1000)): LocalData {
       left -= n;
     }
     ladders[id] = levels.map((l) => l.join(':')).join(',');
+
+    // vendors pay a fraction of the market; every seventh item is listed under it (a vendor flip)
+    names[id].c = CATEGORY[id];
+    names[id].v = idx % 7 === 3 ? Math.round(min * 1.25) : Math.round(base * 0.15);
+    // sales: most items sell a fair share of what's listed each day, every fifth barely moves
+    const perDay = idx % 5 === 4 ? 0.2 : qty * (0.1 + rand() * 0.4);
+    sales[id] = `${(perDay * 10).toFixed(2)}:${10 * DAY}`;
   });
 
   const last = scanTimes[scanTimes.length - 1];
@@ -108,6 +131,9 @@ export function demoData(now = Math.floor(Date.now() / 1000)): LocalData {
     lastScan: { [realm]: last, [neutral]: nLast },
     ladders: { [realm]: { t: last, items: ladders }, [neutral]: { t: nLast, items: nLadders } },
     ledgers: { [realm]: ledger },
+    sales: { [realm]: sales },
+    watch: {},
+    classes: CLASSES,
     accounts: [],
   };
 }

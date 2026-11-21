@@ -3,12 +3,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listAccounts, appDataPath, addonDir, findWowPath, isWowFolder, type Account } from './wow.ts';
-import { readAccount, scansSince, type AccountData, type ItemName } from './savedVars.ts';
+import { readAccount, scansSince, type AccountData, type ClassNames, type ItemName } from './savedVars.ts';
 import { decode, encode, merge, trim, DAY, type Point } from './history.ts';
-import { ApiClient } from './api.ts';
+import { ApiClient, ApiError } from './api.ts';
 import { buildAppData, writeAppData } from './appData.ts';
 import { saveConfig, configDir, type Config } from './config.ts';
 import { errorMessage } from './errors.ts';
+import { validRealm } from './priceStore.ts';
 
 /** realm -> itemID -> packed history */
 export type PackedRealms = Record<string, Record<string, string>>;
@@ -70,8 +71,16 @@ export interface LocalData {
   ladders: Record<string, { t: number; items: Record<string, string> }>;
   /** ledger record strings from every account, oldest first */
   ledgers: Record<string, string[]>;
+  /** realm -> itemID -> "units:seconds", from the account that has watched it longest */
+  sales: Record<string, Record<string, string>>;
+  /** itemID -> highest price any account watches it at */
+  watch: Record<string, number>;
+  /** category names ("7" / "7:5" -> name), from every account */
+  classes: ClassNames;
   accounts: { name: string; owner: number | null; data: AccountData }[];
 }
+
+const salesSeconds = (packed: string | undefined) => Number(packed?.split(':')[1]) || 0;
 
 /** Read every account's AH Tracker data. Unreadable accounts are added to `errors` and skipped. */
 export function readLocal(wowPath: string, errors: string[] = [], accountList: Account[] = listAccounts(wowPath)): LocalData {
@@ -80,6 +89,9 @@ export function readLocal(wowPath: string, errors: string[] = [], accountList: A
   const lastScan: LocalData['lastScan'] = {};
   const ladders: LocalData['ladders'] = {};
   const ledgers: LocalData['ledgers'] = {};
+  const sales: LocalData['sales'] = {};
+  const watch: LocalData['watch'] = {};
+  const classes: LocalData['classes'] = {};
   const accounts: LocalData['accounts'] = [];
   for (const acct of accountList) {
     let data: AccountData | null;
@@ -91,19 +103,68 @@ export function readLocal(wowPath: string, errors: string[] = [], accountList: A
     }
     if (!data) continue;
     accounts.push({ name: acct.name, owner: acct.owner ?? null, data });
+    for (const [id, price] of Object.entries(data.watch || {})) watch[id] = Math.max(watch[id] || 0, price);
+    Object.assign(classes, data.classNames);
     for (const [realm, r] of Object.entries(data.realms)) {
+      if (!validRealm(realm)) continue; // e.g. "-Alliance", saved without a realm name
       const realmItems = (local[realm] ??= {});
       names[realm] = { ...names[realm], ...r.names };
       lastScan[realm] = Math.max(lastScan[realm] || 0, r.lastScan);
       if (r.ladderTime && r.ladderTime > (ladders[realm]?.t || 0)) ladders[realm] = { t: r.ladderTime, items: r.ladders };
       if (r.ledger?.length) (ledgers[realm] ??= []).push(...r.ledger);
+      const realmSales = (sales[realm] ??= {});
+      for (const [id, packed] of Object.entries(r.sales || {})) {
+        if (salesSeconds(packed) > salesSeconds(realmSales[id])) realmSales[id] = packed;
+      }
       for (const [id, points] of Object.entries(r.items)) (realmItems[id] ??= []).push(points);
     }
   }
   // records start "kind:time:", so sort by time across accounts
   const time = (rec: string) => Number(rec.split(':')[1]) || 0;
   for (const list of Object.values(ledgers)) list.sort((a, b) => time(a) - time(b));
-  return { local, names, lastScan, ladders, ledgers, accounts };
+  return { local, names, lastScan, ladders, ledgers, sales, watch, classes, accounts };
+}
+
+/** A watched item listed at or under its price in someone else's scan (from the server). */
+export interface WatchAlert { realm: string; id: string; name: string | null; min: number; max: number; t: number }
+
+/** How long after a scan an alert is still worth sending. */
+const ALERT_WINDOW = 6 * 3600;
+
+/**
+ * Watched items whose newest server point is at or under their price, newer than the
+ * last alert for that item. alerted ("realm|id" -> point time) is updated in place.
+ * Points from your own scans are skipped: the addon already announced those in game.
+ */
+export function watchAlerts(
+  watch: Record<string, number>, remote: Record<string, Record<string, Point[]>>,
+  names: LocalData['names'], alerted: Record<string, number>, now: number,
+  local: LocalData['local'] = {},
+): WatchAlert[] {
+  const out: WatchAlert[] = [];
+  for (const [realm, items] of Object.entries(remote)) {
+    for (const [id, max] of Object.entries(watch)) {
+      const points = items[id];
+      const last = points?.[points.length - 1];
+      if (!last) continue;
+      const [t, min] = last;
+      const key = `${realm}|${id}`;
+      if (min > max || t <= (alerted[key] || 0) || now - t > ALERT_WINDOW) continue;
+      const mine = local[realm]?.[id]?.some((list) => list.some((p) => p[0] >= t));
+      if (mine) continue;
+      alerted[key] = t;
+      out.push({ realm, id, name: names[realm]?.[id]?.n ?? null, min, max, t });
+    }
+  }
+  return out;
+}
+
+/** "12g 50s 3c" from copper, like the addon. */
+export function formatMoney(copper: number): string {
+  const g = Math.floor(copper / 10000), s = Math.floor((copper % 10000) / 100), c = copper % 100;
+  if (g) return `${g}g ${String(s).padStart(2, '0')}s`;
+  if (s) return `${s}s ${String(c).padStart(2, '0')}c`;
+  return `${c}c`;
 }
 
 /** Cached server download for a realm, decoded, or null. */
@@ -160,6 +221,8 @@ export interface SyncSummary {
   changedItems?: number;
   wrote: boolean;
   errors: string[];
+  /** watched items someone else's scan found at or under your price */
+  alerts?: WatchAlert[];
 }
 
 export interface SyncOptions {
@@ -178,7 +241,7 @@ export async function sync(config: Config, { log = () => {}, now = Math.floor(Da
   const summary: SyncSummary = { realms: 0, items: 0, uploadedScans: 0, downloadedRealms: 0, wrote: false, errors: [] };
 
   // 1. Read local scans from every account.
-  const { local, accounts } = readLocal(wowPath, summary.errors);
+  const { local, accounts, watch, names } = readLocal(wowPath, summary.errors);
   log(`Read ${accounts.length} account(s) with AH Tracker data.`);
 
   // 2. Upload new scans and download realm prices.
@@ -189,6 +252,7 @@ export async function sync(config: Config, { log = () => {}, now = Math.floor(Da
     if (config.upload) {
       for (const { name, data } of accounts) {
         for (const [realm, r] of Object.entries(data.realms)) {
+          if (!validRealm(realm)) continue;
           const cursorKey = `${name}|${realm}`;
           const since = Math.max(config.cursors[cursorKey] ?? now - FIRST_UPLOAD_WINDOW, now - MAX_UPLOAD_AGE);
           const scans = scansSince(r, since);
@@ -196,7 +260,9 @@ export async function sync(config: Config, { log = () => {}, now = Math.floor(Da
             for (let i = 0; i < scans.length; i += SCANS_PER_UPLOAD) {
               const batch = scans.slice(i, i + SCANS_PER_UPLOAD);
               // names go with the first batch, so the server can show them to everyone
-              await api.uploadScans(realm, batch, i === 0 && Object.keys(r.names || {}).length ? r.names : undefined);
+              const first = i === 0;
+              await api.uploadScans(realm, batch, first && Object.keys(r.names || {}).length ? r.names : undefined,
+                first && Object.keys(data.classNames || {}).length ? data.classNames : undefined);
               config.cursors[cursorKey] = batch[batch.length - 1].t;
               summary.uploadedScans += batch.length;
             }
@@ -215,12 +281,21 @@ export async function sync(config: Config, { log = () => {}, now = Math.floor(Da
         summary.downloadedRealms++;
         summary.changedItems = (summary.changedItems || 0) + pulled.changed;
       } catch (err) {
+        // a realm nobody has uploaded prices for yet (a new character, a new realm key)
+        if (err instanceof ApiError && err.status === 404) continue;
         const cached = readCache(realm);
         summary.errors.push(`Download for ${realm} failed: ${errorMessage(err)}${cached ? ' (using the last download)' : ''}`);
         if (cached) remote[realm] = decodeItems(cached);
       }
     }
     if (summary.downloadedRealms) log(`Pulled prices for ${summary.downloadedRealms} realm(s): ${summary.changedItems || 0} item(s) new or changed.`);
+  }
+
+  // Watched items that other players' scans found cheap.
+  if (Object.keys(watch).length && Object.keys(remote).length) {
+    config.alerted ??= {};
+    summary.alerts = watchAlerts(watch, remote, names, config.alerted, now, local);
+    for (const a of summary.alerts) log(`Watchlist: ${a.name ?? `item ${a.id}`} listed at ${formatMoney(a.min)} on ${a.realm} (your price ${formatMoney(a.max)}).`);
   }
 
   // 3. Merge (your scans first, they win over server points at the same time) and write.

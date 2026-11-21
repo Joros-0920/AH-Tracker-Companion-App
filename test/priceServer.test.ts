@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Server } from 'node:http';
+import type { Server, IncomingHttpHeaders } from 'node:http';
 import { listen, json } from './helpers.ts';
 import type { PriceStore as Store } from '../src/priceStore.ts';
 
@@ -28,9 +28,9 @@ test('a bucket takes the median of its uploaders and the newest scan time', () =
   const t = NOW - 2 * HOUR + 60;
   s.ingest(REALM, 'a', [{ t, items: [[5, 90, 100, 10]] }]);
   s.ingest(REALM, 'b', [{ t: t + 600, items: [[5, 95, 110, 20]] }]);
-  s.ingest(REALM, 'c', [{ t: t + 300, items: [[5, 10, 9999, 30]] }]); // way off, outvoted
+  s.ingest(REALM, 'c', [{ t: t + 300, items: [[5, 10, 9999, 30]] }]); // way off: dropped as an outlier
   const [p] = s.history(REALM).items[5];
-  assert.deepEqual(p, [t + 600, 90, 110, 20]);
+  assert.deepEqual(p, [t + 600, 93, 105, 15]);
 });
 
 test('a later scan from the same uploader in the same hour replaces its earlier one', () => {
@@ -40,6 +40,27 @@ test('a later scan from the same uploader in the same hour replaces its earlier 
   s.ingest(REALM, 'a', [{ t: t + 900, items: [[5, 200, 200, 2]] }]);
   s.ingest(REALM, 'a', [{ t: t + 60, items: [[5, 1, 1, 1]] }]); // older than what's there: ignored
   assert.deepEqual(s.history(REALM).items[5], [[t + 900, 200, 200, 2]]);
+});
+
+test('item quality: -1 is unknown, and unknown never replaces a known quality', () => {
+  clock = NOW;
+  const s = store('quality');
+  const scan = (t: number) => [{ t, items: [[873, 100, 100, 1]] as [number, number, number, number][] }];
+  s.ingest(REALM, 'a', scan(NOW - 3 * HOUR), { 873: { n: 'Staff of Jordan', q: -1 } });
+  assert.equal(s.history(REALM).names[873].q, null);
+  s.ingest(REALM, 'a', scan(NOW - 2 * HOUR), { 873: { n: 'Staff of Jordan', q: 4 } });
+  assert.equal(s.history(REALM).names[873].q, 4);
+  s.ingest(REALM, 'a', scan(NOW - HOUR), { 873: { n: 'Staff of Jordan', q: -1 } });
+  assert.equal(s.history(REALM).names[873].q, 4);
+});
+
+test('mergeNames keeps a known quality over an unknown one', async () => {
+  const { mergeNames } = await import('../src/serve.ts');
+  const merged = mergeNames(
+    { 1: { n: 'Old', q: 4 }, 2: { n: 'B', q: 2 } },
+    { 1: { n: 'New', q: -1 }, 2: { n: 'B', q: 3 }, 3: { n: 'C', q: null } },
+  );
+  assert.deepEqual(merged, { 1: { n: 'New', q: 4 }, 2: { n: 'B', q: 3 }, 3: { n: 'C', q: null } });
 });
 
 test('bad and out-of-range points are skipped', () => {
@@ -52,6 +73,8 @@ test('bad and out-of-range points are skipped', () => {
   assert.equal(r.points, 1);
   assert.deepEqual(Object.keys(s.history(REALM).items), ['8']);
   assert.throws(() => s.ingest('bad/realm', 'a', []), /realm/);
+  assert.throws(() => s.ingest('-Alliance', 'a', []), /realm/, 'an AH saved without its realm name');
+  assert.throws(() => s.ingest('Unknown-Horde', 'a', []), /realm/);
 });
 
 test('since a cursor returns only items changed after it, and repeats are not changes', () => {
@@ -166,4 +189,77 @@ test('reporter ids hide the key', () => {
   assert.equal(reporterId(KEY_A).length, 16);
   assert.notEqual(reporterId(KEY_A), reporterId(KEY_B));
   assert.ok(!reporterId(KEY_A).includes('aaaa'));
+});
+
+test('with a save delay, uploads are written together, and flush() writes the rest', () => {
+  clock = NOW;
+  const dir = path.join(tmp, 'delayed');
+  const s = new PriceStore(dir, { now: () => clock, saveDelayMs: 60_000 });
+  s.ingest(REALM, 'a', [{ t: NOW - HOUR, items: [[5, 100, 100, 1]] }]);
+  s.ingest(REALM, 'b', [{ t: NOW - HOUR, items: [[6, 100, 100, 1]] }]);
+  assert.equal(fs.existsSync(s.file(REALM)), false, 'nothing written yet');
+  assert.ok(s.history(REALM).items[6], 'served from memory meanwhile');
+  s.flush();
+  const reread = new PriceStore(dir, { now: () => clock });
+  assert.deepEqual(Object.keys(reread.history(REALM).items).sort(), ['5', '6']);
+});
+
+test('big answers are gzipped for clients that take it, plain for others', async () => {
+  const http = await import('node:http');
+  const zlib = await import('node:zlib');
+  const items: [number, number, number, number][] = [];
+  for (let id = 1000; id < 1200; id++) items.push([id, 100, 110, 3]);
+  await new ApiClient(base, KEY_A).uploadScans(REALM, [{ t: now() - 120, items }]);
+  const get = (encoding?: string) => new Promise<{ headers: IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+    http.get(`${base}/v1/realms/${REALM}/prices`, { headers: encoding ? { 'Accept-Encoding': encoding } : {} }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+  const zipped = await get('gzip, deflate, br');
+  assert.equal(zipped.headers['content-encoding'], 'gzip');
+  const plain = await get();
+  assert.equal(plain.headers['content-encoding'], undefined);
+  assert.ok(zipped.body.length < plain.body.length / 3, `gzip is much smaller (${zipped.body.length} vs ${plain.body.length})`);
+  const a = JSON.parse(zlib.gunzipSync(zipped.body).toString('utf8'));
+  const b = JSON.parse(plain.body.toString('utf8'));
+  assert.deepEqual(Object.keys(a.items).sort(), Object.keys(b.items).sort());
+});
+
+test('hashed web assets are cached for good, index.html is revalidated', async () => {
+  const dist = path.join(tmp, 'dist');
+  fs.mkdirSync(path.join(dist, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(dist, 'index.html'), '<!doctype html><title>x</title>');
+  fs.writeFileSync(path.join(dist, 'assets', 'app-abc123.js'), 'console.log(1)'.repeat(200));
+  const srv = createServer({ wowPath: path.join(tmp, 'wow') }, { pushToken: null, webDist: dist });
+  const srvBase = await listen(srv);
+  try {
+    const page = await fetch(`${srvBase}/`);
+    assert.equal(page.headers.get('cache-control'), 'no-cache');
+    assert.match(await page.text(), /<title>x/);
+    const js = await fetch(`${srvBase}/assets/app-abc123.js`);
+    assert.match(js.headers.get('cache-control') || '', /immutable/);
+    assert.equal(js.headers.get('content-encoding'), 'gzip');
+    assert.equal(await js.text(), 'console.log(1)'.repeat(200), 'fetch unzips it');
+  } finally {
+    srv.close();
+  }
+});
+
+test('?item= answers with one item, and full answers are reused until the data changes', async () => {
+  const t = now() - 300;
+  await new ApiClient(base, KEY_A).uploadScans(REALM, [{ t, items: [[7, 70, 77, 1], [8, 80, 88, 1]] }], { 7: { n: 'Seven', q: 1 } });
+  const one = await json(fetch(`${base}/v1/realms/${REALM}/prices?days=180&item=7`));
+  assert.deepEqual(Object.keys(one.items), ['7']);
+  assert.equal(one.full, false);
+  assert.deepEqual(Object.keys(one.names), ['7']);
+  assert.equal((await fetch(`${base}/v1/realms/${REALM}/prices?item=abc`)).status, 400);
+
+  const a = await json(fetch(`${base}/v1/realms/${REALM}/prices?days=30`));
+  const b = await json(fetch(`${base}/v1/realms/${REALM}/prices?days=30`));
+  assert.equal(a.generated, b.generated, 'second answer came from the cache');
+  await new ApiClient(base, KEY_B).uploadScans(REALM, [{ t: now() - 30, items: [[9, 90, 99, 1]] }]);
+  const c = await json(fetch(`${base}/v1/realms/${REALM}/prices?days=30`));
+  assert.ok(c.items[9], 'a new upload shows up right away');
 });

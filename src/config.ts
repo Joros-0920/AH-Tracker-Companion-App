@@ -33,6 +33,10 @@ export interface Config {
   pushed: Record<string, string>;
   /** "account|realm" -> last uploaded scan time */
   cursors: Record<string, number>;
+  /** "realm|itemID" -> time of the server point last alerted for (watchlist) */
+  alerted?: Record<string, number>;
+  /** desktop notifications for watchlist hits */
+  alerts: boolean;
   lastSync: number | null;
   lastSummary?: SyncSummary;
 }
@@ -48,10 +52,11 @@ const DEFAULTS: Omit<Config, 'apiKey'> & { apiKey: string | null } = {
   pushToken: null,
   pushed: {},
   cursors: {},
+  alerts: true,
   lastSync: null,
 };
 
-export const EDITABLE = ['wowPath', 'serverUrl', 'upload', 'intervalMinutes', 'days', 'pushUrl', 'pushToken'] as const;
+export const EDITABLE = ['wowPath', 'serverUrl', 'upload', 'alerts', 'intervalMinutes', 'days', 'pushUrl', 'pushToken'] as const;
 export type EditableKey = (typeof EDITABLE)[number];
 export const isEditable = (key: string | undefined): key is EditableKey => (EDITABLE as readonly (string | undefined)[]).includes(key);
 /** settings `config` prints masked */
@@ -83,7 +88,7 @@ export function saveConfig(config: Partial<Config>): void {
 /** Parse a CLI string into the type of the setting. */
 export function coerce(key: EditableKey, raw: string): string | number | boolean | null {
   if (raw === 'null' || raw === '') return null;
-  if (key === 'upload') return raw === 'true' || raw === '1' || raw === 'yes';
+  if (key === 'upload' || key === 'alerts') return raw === 'true' || raw === '1' || raw === 'yes';
   if (key === 'intervalMinutes' || key === 'days') {
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} must be a positive number`);
