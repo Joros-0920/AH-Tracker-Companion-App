@@ -432,6 +432,7 @@ export class PriceStore {
       const days = new Map<number, Point[]>();
       // work out every point before deleting buckets, since each is checked against the day before it
       const merging: { b: number; p: Point | null }[] = [];
+      const before = Object.keys(item.b).length;
       for (const { b, point } of this.evaluate(item)) {
         if (b < keepFrom) { delete item.b[b]; continue; }
         if (b >= rawFrom) continue;
@@ -439,6 +440,9 @@ export class PriceStore {
         if (reports['*'] && Object.keys(reports).length === 1 && b % DAY === 0) continue; // already a day bucket
         merging.push({ b, p: point });
       }
+      // the buckets change below without bumping u, and the bucket count can come out the
+      // same (one hour -> one day), so the cached evaluate() for this item would go stale
+      if (merging.length || Object.keys(item.b).length !== before) this.evaluated.delete(item);
       for (const { b, p } of merging) {
         delete item.b[b];
         if (!p) continue;

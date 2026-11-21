@@ -109,6 +109,19 @@ test('old hours merge into days, very old points are dropped, and it survives a 
   assert.equal(s.history(REALM, { days: 365 }).items[5], undefined, 'dropped after 180 days');
 });
 
+test('compacting twice after an hour turns into a day bucket does not crash', () => {
+  // the hour bucket becomes one day bucket (same bucket count, same u), which used to
+  // leave a stale evaluate() cache pointing at the deleted hour, and the next compact threw
+  clock = NOW;
+  const s = store('compact-twice');
+  const day = Math.floor((NOW - 13 * DAY) / DAY) * DAY;
+  s.ingest(REALM, 'a', [{ t: day + 2 * HOUR, items: [[5, 100, 100, 10]] }]);
+  clock = NOW + 3 * DAY;
+  s.ingest(REALM, 'a', [{ t: clock - HOUR, items: [[9, 1, 1, 1]] }]);
+  s.ingest(REALM, 'a', [{ t: clock - 30 * 60, items: [[9, 2, 2, 2]] }]);
+  assert.deepEqual(s.history(REALM, { days: 30 }).items[5], [[day + 2 * HOUR, 100, 100, 10]]);
+});
+
 // HTTP -------------------------------------------------------------------------
 
 const KEY_A = 'a'.repeat(32);

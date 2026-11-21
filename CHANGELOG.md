@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-21
+
+### Fixed
+
+- The price server stopped taking uploads for a realm, answering `500 Cannot read properties of undefined (reading '*')`, once one of its items had an hour of prices merged into a day bucket. Merging hours into days now clears that item's cached history, so the next merge doesn't look for the hour it removed.
+
 ## [1.1.1] - 2026-11-21
 
 ### Added
@@ -83,6 +89,7 @@ The builds aren't code-signed, so the first run shows "Windows protected your PC
 - Windows builds only. Building on Linux or WSL needs Wine.
 - Not code-signed.
 
+[1.1.2]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.2
 [1.1.1]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v1.1.0
 [0.1.0]: https://github.com/Joros-0920/AH-Tracker-Companion-App/releases/tag/v0.1.0

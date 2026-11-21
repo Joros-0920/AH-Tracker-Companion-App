@@ -1,7 +1,7 @@
 {
   "name": "ah-tracker-companion",
   "productName": "AH Tracker",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Companion app for the AH Tracker WoW Forever addon: shares scans, downloads realm prices, and shows the web app in a desktop window.",
   "type": "module",
   "main": "electron/main.ts",
